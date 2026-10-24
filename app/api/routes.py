@@ -5,6 +5,7 @@ from app.schemas.orders import (
     AnalysisRequest,
     AnalysisResponse,
 )
+from app.services.order_analysis import analyze_order_issue
 from app.tools.order_lookup import get_order_by_id
 
 
@@ -17,7 +18,7 @@ router = APIRouter()
     summary="Analyze a delivery order",
 )
 def analyze_order(request: AnalysisRequest) -> AnalysisResponse:
-    """Retrieve an order before its issue is analyzed."""
+    """Retrieve an order and analyze the customer's complaint."""
     order = get_order_by_id(request.order_id)
 
     if order is None:
@@ -26,12 +27,14 @@ def analyze_order(request: AnalysisRequest) -> AnalysisResponse:
             detail="Order not found in the demonstration database.",
         )
 
+    analysis = analyze_order_issue(
+        order=order,
+        customer_message=request.customer_message,
+    )
+
     return AnalysisResponse(
         order=order,
         customer_message=request.customer_message,
-        status="received",
-        message=(
-            "Order found successfully. Intelligent issue "
-            "analysis will be added in a future version."
-        ),
+        status="analyzed",
+        message=analysis,
     )

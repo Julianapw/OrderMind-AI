@@ -21,7 +21,16 @@ def test_health_check():
     assert response.json()["status"] == "ok"
 
 
-def test_analyze_existing_order():
+
+def test_analyze_existing_order(monkeypatch):
+    def fake_analysis(order, customer_message):
+        return "O pedido consta como entregue, mas a ausência do item precisa ser investigada."
+
+    monkeypatch.setattr(
+        "app.api.routes.analyze_order_issue",
+        fake_analysis,
+    )
+
     response = client.post(
         "/api/v1/orders/analyze",
         json={
@@ -37,8 +46,10 @@ def test_analyze_existing_order():
     data = response.json()
     assert data["order"]["order_id"] == "PED-1001"
     assert data["order"]["restaurant"] == "Cantina da Praça"
-    assert data["status"] == "received"
+    assert data["status"] == "analyzed"
     assert len(data["order"]["items"]) == 3
+    assert "precisa ser investigada" in data["message"]
+
 
 
 def test_analyze_unknown_order():
