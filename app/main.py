@@ -1,6 +1,9 @@
 
 from fastapi import FastAPI
 
+from app.api.routes import router
+
+
 app = FastAPI(
     title="OrderMind",
     description=(
@@ -26,3 +29,10 @@ def health_check() -> dict[str, str]:
         "status": "ok",
         "application": "OrderMind",
     }
+
+
+app.include_router(
+    router,
+    prefix="/api/v1",
+    tags=["Orders"],
+)
