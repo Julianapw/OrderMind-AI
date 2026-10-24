@@ -1,0 +1,55 @@
+
+[
+  {
+    "order_id": "PED-1001",
+    "customer_id": "CLI-001",
+    "restaurant": "Cantina da Praça",
+    "status": "delivered",
+    "items": [
+      {
+        "name": "Hambúrguer artesanal",
+        "quantity": 1,
+        "price": 32.9
+      },
+      {
+        "name": "Batata frita",
+        "quantity": 1,
+        "price": 12.0
+      },
+      {
+        "name": "Refrigerante",
+        "quantity": 1,
+        "price": 6.0
+      }
+    ],
+    "total": 50.9
+  },
+  {
+    "order_id": "PED-1002",
+    "customer_id": "CLI-002",
+    "restaurant": "Sushi Central",
+    "status": "preparing",
+    "items": [
+      {
+        "name": "Combo de sushi",
+        "quantity": 1,
+        "price": 45.0
+      }
+    ],
+    "total": 45.0
+  },
+  {
+    "order_id": "PED-1003",
+    "customer_id": "CLI-003",
+    "restaurant": "Pizzaria do Bairro",
+    "status": "delivered",
+    "items": [
+      {
+        "name": "Pizza de mussarela",
+        "quantity": 1,
+        "price": 42.0
+      }
+    ],
+    "total": 42.0
+  }
+]
