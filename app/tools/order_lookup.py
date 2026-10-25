@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 
+from langchain_core.tools import tool
+
 from app.schemas.orders import Order
 
 
@@ -30,3 +32,18 @@ def get_order_by_id(order_id: str) -> Order | None:
             return order
 
     return None
+
+
+@tool
+def lookup_order_tool(order_id: str) -> dict | str:
+    """Busca um pedido pelo ID e retorna seus dados registrados.
+
+    Use esta ferramenta quando precisar verificar os dados
+    de um pedido antes de analisar uma reclamação.
+    """
+    order = get_order_by_id(order_id)
+
+    if order is None:
+        return f"Nenhum pedido encontrado com o ID {order_id}."
+
+    return order.model_dump()
