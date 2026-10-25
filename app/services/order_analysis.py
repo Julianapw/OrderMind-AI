@@ -57,9 +57,6 @@ def analyze_order_issue(order: Order, customer_message: str) -> str:
     # Allow the model to request a tool and then use its result.
     for _ in range(5):
         response = llm.invoke(messages)
-
-        print("Ferramentas solicitadas:", response.tool_calls)
-
         messages.append(response)
 
         if not response.tool_calls:
