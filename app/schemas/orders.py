@@ -33,6 +33,42 @@ class AnalysisRequest(BaseModel):
     )
 
 
+class ComplaintAnalysis(BaseModel):
+    """Structured analysis of a customer's delivery complaint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed_facts: list[str] = Field(
+        description=(
+            "Facts supported by the order data or customer message."
+        )
+    )
+    evidence: list[str] = Field(
+        description="Evidence used to support the analysis."
+    )
+    complaint_assessment: str = Field(
+        min_length=1,
+        description=(
+            "Assessment of the customer's complaint based on "
+            "available evidence."
+        ),
+    )
+    recommended_next_step: str = Field(
+        min_length=1,
+        description=(
+            "Practical next step, without promising compensation."
+        ),
+    )
+    missing_information: list[str] = Field(
+        description=(
+            "Information that is still missing to reach a conclusion."
+        )
+    )
+    requires_human_review: bool = Field(
+        description="Whether a person needs to review the case."
+    )
+
+
 class AnalysisResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -40,3 +76,4 @@ class AnalysisResponse(BaseModel):
     customer_message: str
     status: str
     message: str
+    analysis: ComplaintAnalysis | None = None

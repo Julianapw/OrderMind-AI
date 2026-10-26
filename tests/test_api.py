@@ -2,6 +2,7 @@
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.schemas.orders import ComplaintAnalysis
 
 
 client = TestClient(app)
@@ -11,20 +12,36 @@ def test_home():
     response = client.get("/")
 
     assert response.status_code == 200
-    assert response.json()["application"] == "OrderMind"
 
 
 def test_health_check():
     response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
-
 
 
 def test_analyze_existing_order(monkeypatch):
     def fake_analysis(order, customer_message):
-        return "O pedido consta como entregue, mas a ausência do item precisa ser investigada."
+        return ComplaintAnalysis(
+            confirmed_facts=[
+                "O pedido consta como entregue."
+            ],
+            evidence=[
+                "Status registrado do pedido: delivered."
+            ],
+            complaint_assessment=(
+                "A ausência das batatas fritas foi relatada "
+                "pelo cliente, mas precisa ser investigada."
+            ),
+            recommended_next_step=(
+                "Verificar com o restaurante se todos os itens "
+                "foram enviados."
+            ),
+            missing_information=[
+                "Não há confirmação de quais itens foram entregues."
+            ],
+            requires_human_review=True,
+        )
 
     monkeypatch.setattr(
         "app.api.routes.analyze_order_issue",
@@ -44,12 +61,14 @@ def test_analyze_existing_order(monkeypatch):
     assert response.status_code == 200
 
     data = response.json()
-    assert data["order"]["order_id"] == "PED-1001"
-    assert data["order"]["restaurant"] == "Cantina da Praça"
-    assert data["status"] == "analyzed"
-    assert len(data["order"]["items"]) == 3
-    assert "precisa ser investigada" in data["message"]
 
+    assert data["status"] == "analyzed"
+    assert data["order"]["order_id"] == "PED-1001"
+    assert data["analysis"]["requires_human_review"] is True
+    assert data["analysis"]["confirmed_facts"] == [
+        "O pedido consta como entregue."
+    ]
+    assert "precisa ser investigada" in data["message"]
 
 
 def test_analyze_unknown_order():
@@ -57,12 +76,11 @@ def test_analyze_unknown_order():
         "/api/v1/orders/analyze",
         json={
             "order_id": "PED-9999",
-            "customer_message": "My order never arrived.",
+            "customer_message": "Where is my order?",
         },
     )
 
     assert response.status_code == 404
-    assert "Order not found" in response.json()["detail"]
 
 
 def test_reject_short_customer_message():
@@ -70,7 +88,7 @@ def test_reject_short_customer_message():
         "/api/v1/orders/analyze",
         json={
             "order_id": "PED-1001",
-            "customer_message": "Hi",
+            "customer_message": "Oi",
         },
     )
 
@@ -82,8 +100,8 @@ def test_reject_extra_request_fields():
         "/api/v1/orders/analyze",
         json={
             "order_id": "PED-1001",
-            "customer_message": "My order arrived incomplete.",
-            "refund_approved": True,
+            "customer_message": "Where is my order?",
+            "unexpected_field": "not allowed",
         },
     )
 

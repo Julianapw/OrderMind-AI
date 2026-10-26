@@ -1,10 +1,19 @@
 
+import logging
+
 from langchain_core.messages import ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
+from pydantic import ValidationError
 
 from app.core.llm import get_llm
-from app.schemas.orders import Order
+from app.schemas.orders import ComplaintAnalysis, Order
 from app.tools.order_lookup import lookup_order_tool
+
+
+logger = logging.getLogger(__name__)
+
+MAX_TOOL_ROUNDS = 3
+MODEL_TIMEOUT_SECONDS = 20
 
 
 analysis_prompt = ChatPromptTemplate.from_messages(
@@ -24,10 +33,9 @@ Rules:
 - If evidence is insufficient, explain what needs to be checked.
 - Respond in the same language as the customer's message.
 - Be concise, professional, and empathetic.
-- Structure your response with:
-  1. What the data confirms
-  2. Assessment of the complaint
-  3. Recommended next step
+- Never claim that an action was completed unless evidence confirms it.
+- Request human review when the available evidence is insufficient
+  or the case requires a decision beyond the available information.
 """,
         ),
         (
@@ -45,8 +53,29 @@ Investigate the complaint using the available tool when needed.
 )
 
 
-def analyze_order_issue(order: Order, customer_message: str) -> str:
-    """Analyze a complaint using the Gemini model and available tools."""
+def _fallback_analysis(reason: str) -> ComplaintAnalysis:
+    """Return a safe structured result when analysis cannot be completed."""
+    return ComplaintAnalysis(
+        confirmed_facts=[],
+        evidence=[],
+        complaint_assessment=reason,
+        recommended_next_step=(
+            "Verificar os dados do pedido e a reclamação manualmente "
+            "antes de tomar qualquer decisão."
+        ),
+        missing_information=[
+            "Não foi possível confirmar todos os dados necessários "
+            "para concluir a análise."
+        ],
+        requires_human_review=True,
+    )
+
+
+def analyze_order_issue(
+    order: Order,
+    customer_message: str,
+) -> ComplaintAnalysis:
+    """Analyze a complaint and return a validated structured result."""
     llm = get_llm().bind_tools([lookup_order_tool])
 
     messages = analysis_prompt.format_messages(
@@ -54,41 +83,156 @@ def analyze_order_issue(order: Order, customer_message: str) -> str:
         customer_message=customer_message,
     )
 
-    # Allow the model to request a tool and then use its result.
-    for _ in range(5):
-        response = llm.invoke(messages)
+    for round_number in range(1, MAX_TOOL_ROUNDS + 1):
+        logger.info(
+            "OrderMind model call %s/%s for order %s",
+            round_number,
+            MAX_TOOL_ROUNDS,
+            order.order_id,
+        )
+
+        response = llm.with_config(
+            {
+                "timeout": MODEL_TIMEOUT_SECONDS,
+                "max_retries": 0,
+            }
+        ).invoke(messages)
+
+        tool_calls = response.tool_calls or []
+
+        if not tool_calls:
+            logger.info(
+                "Generating structured analysis for order %s",
+                order.order_id,
+            )
+
+            structured_llm = get_llm().with_structured_output(
+                ComplaintAnalysis
+            )
+
+            structured_prompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        """
+You are OrderMind, a delivery complaint analysis assistant.
+
+Return a structured analysis that follows the requested schema.
+
+Rules:
+- Use only the supplied order data, customer message, and tool evidence.
+- Never invent facts or claim that an unverified event occurred.
+- Separate confirmed facts from allegations and assumptions.
+- If evidence is insufficient, explain what remains unknown.
+- Never promise refunds, compensation, or other actions.
+- Recommend a practical next step.
+- Set requires_human_review to true when evidence is insufficient
+  or a human decision is needed.
+- Respond in the same language as the customer's message.
+- Keep each field concise and specific.
+""",
+                    ),
+                    (
+                        "human",
+                        """
+Order data:
+{order_data}
+
+Customer complaint:
+{customer_message}
+
+Evidence from the investigation:
+{investigation}
+
+Produce the structured complaint analysis.
+""",
+                    ),
+                ]
+            )
+
+            investigation = "\n".join(
+                str(message.content)
+                for message in messages
+                if isinstance(message, ToolMessage)
+            )
+
+            try:
+                result = structured_llm.with_config(
+                    {
+                        "timeout": MODEL_TIMEOUT_SECONDS,
+                        "max_retries": 0,
+                    }
+                ).invoke(
+                    structured_prompt.format_messages(
+                        order_data=order.model_dump_json(indent=2),
+                        customer_message=customer_message,
+                        investigation=(
+                            investigation
+                            if investigation
+                            else "Nenhuma consulta adicional foi realizada."
+                        ),
+                    )
+                )
+
+                if isinstance(result, ComplaintAnalysis):
+                    return result
+
+                return ComplaintAnalysis.model_validate(result)
+
+            except (ValidationError, ValueError, TypeError):
+                logger.exception(
+                    "Invalid structured analysis for order %s",
+                    order.order_id,
+                )
+                return _fallback_analysis(
+                    "Não foi possível validar a análise gerada."
+                )
+
         messages.append(response)
 
-        if not response.tool_calls:
-            if isinstance(response.content, str):
-                return response.content
+        for tool_call in tool_calls:
+            tool_name = tool_call.get("name", "")
+            tool_call_id = tool_call.get("id", "")
+            tool_args = tool_call.get("args", {})
 
-            if isinstance(response.content, list):
-                text_parts = [
-                    block["text"]
-                    for block in response.content
-                    if isinstance(block, dict)
-                    and isinstance(block.get("text"), str)
-                ]
-                return "\n".join(text_parts)
+            logger.info("OrderMind requested tool: %s", tool_name)
 
-            return str(response.content)
+            if tool_name != lookup_order_tool.name:
+                result = f"Ferramenta não disponível: {tool_name}"
 
-        for tool_call in response.tool_calls:
-            if tool_call["name"] == lookup_order_tool.name:
-                result = lookup_order_tool.invoke(tool_call["args"])
+            elif not isinstance(tool_args, dict):
+                result = "Consulta não realizada: argumentos inválidos."
+
             else:
-                result = f"Tool not available: {tool_call['name']}"
+                requested_order_id = tool_args.get("order_id")
+
+                if requested_order_id != order.order_id:
+                    result = (
+                        "Consulta não realizada: só é permitido consultar "
+                        f"o pedido {order.order_id} nesta análise."
+                    )
+                else:
+                    try:
+                        result = lookup_order_tool.invoke(tool_args)
+                    except Exception:
+                        logger.exception("Order lookup tool failed")
+                        result = (
+                            "Não foi possível consultar os dados do pedido. "
+                            "A reclamação precisa ser verificada manualmente."
+                        )
 
             messages.append(
                 ToolMessage(
                     content=str(result),
-                    tool_call_id=tool_call["id"],
+                    tool_call_id=tool_call_id,
                 )
             )
 
-    return (
-        "Não foi possível concluir a análise dentro do limite "
-        "de chamadas de ferramentas. A reclamação precisa ser "
-        "verificada manualmente."
+    logger.warning(
+        "OrderMind reached the tool-call limit for order %s",
+        order.order_id,
+    )
+
+    return _fallback_analysis(
+        "A investigação atingiu o limite de chamadas antes de ser concluída."
     )

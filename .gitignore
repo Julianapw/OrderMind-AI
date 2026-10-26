@@ -10,3 +10,10 @@ build/
 .coverage
 htmlcov/
 .DS_Store
+
+# Resultados gerados durante a avaliação
+evaluation_results/
+
+# Segredos e configurações locais
+.env.*
+!.env.example
