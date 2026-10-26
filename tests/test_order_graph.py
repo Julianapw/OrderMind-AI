@@ -38,7 +38,6 @@ def make_order():
 
 def test_validate_evidence_flags_empty_analysis():
     analysis = make_analysis()
-
     result = validate_evidence({"analysis": analysis})
 
     assert result["requires_human_review"] is True
@@ -74,26 +73,36 @@ def test_decide_next_step_preserves_model_review_decision():
     assert result["requires_human_review"] is True
 
 
-def test_graph_runs_all_nodes_without_calling_external_llm():
+def test_graph_runs_all_nodes_without_calling_external_llm(monkeypatch):
     expected_analysis = make_analysis(
         confirmed_facts=["O pedido consta como entregue."],
         evidence=["Registro do pedido PED-1001."],
     )
+
+    def fake_lookup(order_id):
+        assert order_id == "PED-1001"
+        return make_order()
 
     def fake_analyze_node(state):
         assert state["order"].order_id == "PED-1001"
         assert state["customer_message"] == "Meu pedido não chegou."
         return {"analysis": expected_analysis}
 
+    monkeypatch.setattr(
+        "app.agent.order_graph.get_order_by_id",
+        fake_lookup,
+    )
+
     graph = build_order_analysis_graph(fake_analyze_node)
 
     result = graph.invoke(
         {
-            "order": make_order(),
+            "order_id": "PED-1001",
             "customer_message": "Meu pedido não chegou.",
         }
     )
 
+    assert result["order"].order_id == "PED-1001"
     assert result["analysis"] == expected_analysis
     assert result["requires_human_review"] is False
     assert "error" not in result
