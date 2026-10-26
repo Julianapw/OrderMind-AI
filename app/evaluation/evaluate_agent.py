@@ -1,11 +1,13 @@
-
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 
 from app.services.order_analysis import analyze_order_issue
 from app.tools.order_lookup import get_order_by_id
 
+
+logger = logging.getLogger(__name__)
 
 CASES = [
     {
@@ -38,29 +40,85 @@ CASES = [
 ]
 
 
+API_ERROR_TERMS = (
+    "429",
+    "resource_exhausted",
+    "quota exceeded",
+    "rate limit",
+    "too many requests",
+    "unavailable",
+    "service unavailable",
+    "deadline_exceeded",
+    "deadline expired",
+    "timed out",
+    "timeout",
+    "503",
+    "504",
+)
+
+
+def classify_execution_error(error: Exception) -> str:
+    """Classify provider errors without exposing them as successful analyses."""
+    message = str(error).lower()
+
+    if any(
+        term in message
+        for term in (
+            "429",
+            "resource_exhausted",
+            "quota exceeded",
+            "rate limit",
+            "too many requests",
+        )
+    ):
+        return "api_quota_error"
+
+    if any(
+        term in message
+        for term in (
+            "deadline_exceeded",
+            "deadline expired",
+            "timed out",
+            "timeout",
+            "504",
+        )
+    ):
+        return "api_timeout"
+
+    if any(
+        term in message
+        for term in (
+            "unavailable",
+            "service unavailable",
+            "503",
+        )
+    ):
+        return "api_unavailable"
+
+    if any(term in message for term in API_ERROR_TERMS):
+        return "api_error"
+
+    return "execution_error"
+
+
 def analysis_to_text(analysis) -> str:
     """Convert structured analysis into text for keyword-based evaluation."""
     if isinstance(analysis, str):
         return analysis
 
     fields = [
-        *analysis.confirmed_facts,
-        *analysis.evidence,
-        analysis.complaint_assessment,
-        analysis.recommended_next_step,
-        *analysis.missing_information,
+        *getattr(analysis, "confirmed_facts", []),
+        *getattr(analysis, "evidence", []),
+        getattr(analysis, "complaint_assessment", ""),
+        getattr(analysis, "recommended_next_step", ""),
+        *getattr(analysis, "missing_information", []),
     ]
 
-    return "\n".join(
-        str(field)
-        for field in fields
-        if field
-    )
+    return "\n".join(str(field) for field in fields if field)
 
 
 def evaluate_response(response: str) -> dict:
-    """Run simple, keyword-based checks on the agent response."""
-
+    """Check for uncertainty acknowledgement and a suggested next step."""
     text = response.lower()
 
     uncertainty_terms = [
@@ -102,7 +160,6 @@ def evaluate_response(response: str) -> dict:
     matched_uncertainty = [
         term for term in uncertainty_terms if term in text
     ]
-
     matched_next_steps = [
         term for term in next_step_terms if term in text
     ]
@@ -116,17 +173,16 @@ def evaluate_response(response: str) -> dict:
     }
 
 
-def evaluate_scenario(response: str, case: dict, order) -> dict:
+def evaluate_scenario(response: str, case: dict, order=None) -> dict:
     """Check whether the response addresses the specific test scenario."""
-
     text = response.lower()
     checks = {}
 
     if case["name"] == "missing_item":
-        checks["mentions_missing_item"] = (
-            "batata frita" in text or "batatas fritas" in text
+        checks["mentions_missing_item"] = any(
+            term in text
+            for term in ("batata frita", "batatas fritas")
         )
-
         checks["acknowledges_delivery_uncertainty"] = any(
             term in text
             for term in [
@@ -173,7 +229,6 @@ def evaluate_scenario(response: str, case: dict, order) -> dict:
                 "status delivered",
             ]
         )
-
         checks["avoids_inventing_cancellation_reason"] = any(
             term in text
             for term in [
@@ -199,7 +254,6 @@ def evaluate_scenario(response: str, case: dict, order) -> dict:
                 "status preparing",
             ]
         )
-
         checks["acknowledges_missing_eta"] = any(
             term in text
             for term in [
@@ -226,7 +280,6 @@ def evaluate_scenario(response: str, case: dict, order) -> dict:
                 "status delivered",
             ]
         )
-
         checks["suggests_checking_discrepancy"] = any(
             term in text
             for term in [
@@ -243,38 +296,40 @@ def evaluate_scenario(response: str, case: dict, order) -> dict:
     return {
         "checks": checks,
         "passed": bool(checks) and all(checks.values()),
+        # Os cenários são avaliações de suporte; não autorizam
+        # automaticamente uma decisão operacional sem supervisão.
         "manual_review_required": True,
     }
 
 
 def summarize_results(results: list[dict]) -> dict:
-    """Summarize completed, passed, failed, and manual-review cases."""
-
-    completed = sum(
-        result["status"] == "completed"
+    """Summarize completed, approved, failed, and review-required cases."""
+    completed_results = [
+        result
         for result in results
-    )
+        if result.get("status") == "completed"
+    ]
 
     approved = sum(
-        result.get("scenario_checks", {}).get("passed", False)
-        for result in results
+        result.get("scenario_checks", {}).get("passed") is True
+        for result in completed_results
     )
 
     failed = sum(
-        result["status"] == "completed"
-        and not result.get("scenario_checks", {}).get("passed", False)
-        for result in results
+        result.get("scenario_checks", {}).get("passed") is False
+        for result in completed_results
     )
 
     manual_review = sum(
-        result.get("scenario_checks", {}).get(
-            "manual_review_required", False
-        )
-        for result in results
+        result.get("requires_human_review") is True
+        or result.get("scenario_checks", {}).get(
+            "manual_review_required"
+        ) is True
+        for result in completed_results
     )
 
     return {
-        "completed": completed,
+        "completed": len(completed_results),
         "approved": approved,
         "failed": failed,
         "manual_review": manual_review,
@@ -284,38 +339,34 @@ def summarize_results(results: list[dict]) -> dict:
 
 def run_evaluation() -> None:
     """Run evaluation scenarios and save results to a JSON file."""
-
     output_dir = Path("evaluation_results")
-    output_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     results = []
 
     for index, case in enumerate(CASES):
         print(f"\nExecutando caso: {case['name']}")
 
-        order = get_order_by_id(case["order_id"])
-
-        if order is None:
-            result = {
-                "case": case["name"],
-                "status": "invalid_test_data",
-                "error": f"Pedido não encontrado: {case['order_id']}",
-            }
-
-            results.append(result)
-            print(result["error"])
-            continue
-
         try:
+            order = get_order_by_id(case["order_id"])
+
+            if order is None:
+                result = {
+                    "case": case["name"],
+                    "status": "invalid_test_data",
+                    "error": f"Pedido não encontrado: {case['order_id']}",
+                }
+                results.append(result)
+                print(result["error"])
+                continue
+
             analysis = analyze_order_issue(
                 order=order,
                 customer_message=case["customer_message"],
             )
 
             response_text = analysis_to_text(analysis)
-
             checks = evaluate_response(response_text)
-
             scenario_checks = evaluate_scenario(
                 response=response_text,
                 case=case,
@@ -351,16 +402,8 @@ def run_evaluation() -> None:
                     indent=2,
                 )
             )
-
             print("\nVerificações automáticas:")
-            print(
-                json.dumps(
-                    checks,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-
+            print(json.dumps(checks, ensure_ascii=False, indent=2))
             print("\nVerificações específicas do cenário:")
             print(
                 json.dumps(
@@ -371,36 +414,23 @@ def run_evaluation() -> None:
             )
 
         except Exception as exc:
-            error_message = str(exc)
-            error_message_lower = error_message.lower()
-
-            is_quota_error = any(
-                term in error_message_lower
-                for term in (
-                    "429",
-                    "resource_exhausted",
-                    "quota exceeded",
-                    "rate limit",
-                    "too many requests",
-                )
+            status = classify_execution_error(exc)
+            logger.exception(
+                "Falha na avaliação do cenário %s",
+                case["name"],
             )
 
-            result = {
+            results.append({
                 "case": case["name"],
-                "status": (
-                    "api_quota_error"
-                    if is_quota_error
-                    else "execution_error"
-                ),
-                "error": error_message,
-            }
+                "status": status,
+                "error": str(exc),
+            })
 
-            results.append(result)
-            print(f"Erro ao executar o caso: {error_message}")
+            print(f"Erro ao executar o caso ({status}): {exc}")
 
-            if is_quota_error:
+            if status.startswith("api_"):
                 print(
-                    "\nLimite da API atingido. "
+                    "\nErro do serviço de IA. "
                     "Interrompendo a avaliação para evitar novas chamadas."
                 )
 
@@ -409,10 +439,9 @@ def run_evaluation() -> None:
                         "case": remaining_case["name"],
                         "status": "not_executed",
                         "reason": (
-                            "Avaliação interrompida devido ao limite da API."
+                            "Avaliação interrompida devido a erro da API."
                         ),
                     })
-
                 break
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -426,15 +455,12 @@ def run_evaluation() -> None:
     print(f"\nResultados salvos em: {output_file}")
     print(f"Casos concluídos: {summary['completed']}/{len(CASES)}")
     print(f"Casos registrados: {summary['registered']}/{len(CASES)}")
-
     print("\nResumo da avaliação")
     print("===================")
     print(f"Cenários concluídos: {summary['completed']}")
     print(f"Cenários aprovados: {summary['approved']}")
     print(f"Cenários reprovados: {summary['failed']}")
-    print(
-        f"Revisões manuais necessárias: {summary['manual_review']}"
-    )
+    print(f"Revisões manuais necessárias: {summary['manual_review']}")
 
 
 if __name__ == "__main__":
