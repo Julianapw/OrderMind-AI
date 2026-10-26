@@ -1,4 +1,3 @@
-
 import logging
 
 from langchain_core.messages import ToolMessage
@@ -15,6 +14,23 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 3
 MODEL_TIMEOUT_SECONDS = 20
+
+
+PROVIDER_ERROR_TERMS = (
+    "resource_exhausted",
+    "quota exceeded",
+    "rate limit",
+    "too many requests",
+    "429",
+    "unavailable",
+    "service unavailable",
+    "503",
+    "deadline_exceeded",
+    "deadline expired",
+    "504",
+    "timed out",
+    "timeout",
+)
 
 
 analysis_prompt = ChatPromptTemplate.from_messages(
@@ -76,7 +92,7 @@ def _analyze_order_issue_impl(
     order: Order,
     customer_message: str,
 ) -> ComplaintAnalysis:
-    """Execute the existing analysis and tool-calling loop."""
+    """Execute the analysis and bounded tool-calling loop."""
     llm = get_llm().bind_tools([lookup_order_tool])
 
     messages = analysis_prompt.format_messages(
@@ -240,9 +256,18 @@ Produce the structured complaint analysis.
 
 
 def _run_analysis_node(state: dict) -> dict:
-    """Run the existing analysis implementation as a graph node."""
-    order = state["order"]
-    customer_message = state["customer_message"]
+    """Run analysis while preserving provider errors for the API."""
+    order = state.get("order")
+    customer_message = state.get("customer_message", "")
+
+    if order is None:
+        return {
+            "analysis": _fallback_analysis(
+                "O pedido não foi encontrado para análise."
+            ),
+            "error": "order_not_found",
+            "requires_human_review": True,
+        }
 
     try:
         analysis = _analyze_order_issue_impl(
@@ -251,11 +276,19 @@ def _run_analysis_node(state: dict) -> dict:
         )
         return {"analysis": analysis}
 
-    except Exception:
+    except Exception as error:
+        error_message = str(error).lower()
+
         logger.exception(
             "OrderMind graph failed while analyzing order %s",
             order.order_id,
         )
+
+        if any(term in error_message for term in PROVIDER_ERROR_TERMS):
+            return {
+                "error": f"llm_provider_error: {error}",
+                "requires_human_review": True,
+            }
 
         return {
             "analysis": _fallback_analysis(
@@ -276,16 +309,21 @@ def analyze_order_issue(
     """Run the complaint analysis through the LangGraph workflow."""
     result = _order_analysis_graph.invoke(
         {
-            "order": order,
+            "order_id": order.order_id,
             "customer_message": customer_message,
         }
     )
+
+    error = result.get("error") or ""
+
+    if error.startswith("llm_provider_error:"):
+        raise RuntimeError(error)
 
     analysis = result.get("analysis")
 
     if not isinstance(analysis, ComplaintAnalysis):
         return _fallback_analysis(
-            "Não foi possível validar o resultado do fluxo de análise."
+            error or "Não foi possível validar o resultado do fluxo de análise."
         )
 
     if (

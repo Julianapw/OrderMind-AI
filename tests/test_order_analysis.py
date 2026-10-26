@@ -1,4 +1,4 @@
-
+import pytest
 from unittest.mock import Mock
 
 from langchain_core.messages import AIMessage, ToolMessage
@@ -406,3 +406,30 @@ def test_agent_returns_fallback_for_invalid_structured_output(
     assert isinstance(result, ComplaintAnalysis)
     assert result.requires_human_review is True
     assert result.recommended_next_step
+
+
+def test_agent_propagates_provider_quota_error(monkeypatch):
+    """A falha de cota do provedor deve chegar à camada da API."""
+
+    def raise_quota_error(messages):
+        raise RuntimeError(
+            "Resource exhausted: quota exceeded (429)"
+        )
+
+    tool_llm = FakeLLM([])
+    tool_llm.invoke = raise_quota_error
+
+    monkeypatch.setattr(
+        order_analysis,
+        "get_llm",
+        lambda: tool_llm,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="llm_provider_error",
+    ):
+        order_analysis.analyze_order_issue(
+            order=create_order(),
+            customer_message="Meu pedido chegou incompleto.",
+        )

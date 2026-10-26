@@ -1,4 +1,3 @@
-
 from fastapi import APIRouter, HTTPException
 
 from app.schemas.orders import (
@@ -37,6 +36,7 @@ def analyze_order(request: AnalysisRequest) -> AnalysisResponse:
     except Exception as error:
         error_message = str(error).lower()
 
+        # API quota or rate limit exceeded
         if any(
             term in error_message
             for term in (
@@ -56,6 +56,26 @@ def analyze_order(request: AnalysisRequest) -> AnalysisResponse:
                 ),
             ) from error
 
+        # Request exceeded the provider's time limit
+        if any(
+            term in error_message
+            for term in (
+                "deadline_exceeded",
+                "deadline expired",
+                "504",
+                "timed out",
+                "timeout",
+            )
+        ):
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    "A análise excedeu o tempo limite do serviço de IA. "
+                    "Tente novamente mais tarde."
+                ),
+            ) from error
+
+        # Provider temporarily unavailable
         if any(
             term in error_message
             for term in (
@@ -72,6 +92,7 @@ def analyze_order(request: AnalysisRequest) -> AnalysisResponse:
                 ),
             ) from error
 
+        # Unexpected internal error
         raise HTTPException(
             status_code=500,
             detail="Erro interno ao analisar o pedido.",

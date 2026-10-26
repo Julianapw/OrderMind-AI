@@ -1,4 +1,4 @@
-
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -106,3 +106,35 @@ def test_reject_extra_request_fields():
     )
 
     assert response.status_code == 422
+@pytest.mark.parametrize(
+    ("error_message", "expected_status"),
+    [
+        ("Resource exhausted: quota exceeded (429)", 503),
+        ("Deadline exceeded: request timed out", 504),
+        ("Service unavailable (503)", 503),
+        ("Unexpected internal error", 500),
+    ],
+)
+def test_analyze_handles_provider_errors(
+    monkeypatch,
+    error_message,
+    expected_status,
+):
+    def fake_analysis(order, customer_message):
+        raise RuntimeError(error_message)
+
+    monkeypatch.setattr(
+        "app.api.routes.analyze_order_issue",
+        fake_analysis,
+    )
+
+    response = client.post(
+        "/api/v1/orders/analyze",
+        json={
+            "order_id": "PED-1001",
+            "customer_message": "Meu pedido chegou incompleto.",
+        },
+    )
+
+    assert response.status_code == expected_status
+    assert response.json()["detail"]
