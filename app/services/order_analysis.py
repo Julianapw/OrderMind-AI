@@ -5,6 +5,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import ValidationError
 
+from app.agent.order_graph import build_order_analysis_graph
 from app.core.llm import get_llm
 from app.schemas.orders import ComplaintAnalysis, Order
 from app.tools.order_lookup import lookup_order_tool
@@ -71,11 +72,11 @@ def _fallback_analysis(reason: str) -> ComplaintAnalysis:
     )
 
 
-def analyze_order_issue(
+def _analyze_order_issue_impl(
     order: Order,
     customer_message: str,
 ) -> ComplaintAnalysis:
-    """Analyze a complaint and return a validated structured result."""
+    """Execute the existing analysis and tool-calling loop."""
     llm = get_llm().bind_tools([lookup_order_tool])
 
     messages = analysis_prompt.format_messages(
@@ -236,3 +237,63 @@ Produce the structured complaint analysis.
     return _fallback_analysis(
         "A investigação atingiu o limite de chamadas antes de ser concluída."
     )
+
+
+def _run_analysis_node(state: dict) -> dict:
+    """Run the existing analysis implementation as a graph node."""
+    order = state["order"]
+    customer_message = state["customer_message"]
+
+    try:
+        analysis = _analyze_order_issue_impl(
+            order=order,
+            customer_message=customer_message,
+        )
+        return {"analysis": analysis}
+
+    except Exception:
+        logger.exception(
+            "OrderMind graph failed while analyzing order %s",
+            order.order_id,
+        )
+
+        return {
+            "analysis": _fallback_analysis(
+                "Não foi possível concluir a análise automaticamente."
+            ),
+            "error": "analysis_execution_failed",
+            "requires_human_review": True,
+        }
+
+
+_order_analysis_graph = build_order_analysis_graph(_run_analysis_node)
+
+
+def analyze_order_issue(
+    order: Order,
+    customer_message: str,
+) -> ComplaintAnalysis:
+    """Run the complaint analysis through the LangGraph workflow."""
+    result = _order_analysis_graph.invoke(
+        {
+            "order": order,
+            "customer_message": customer_message,
+        }
+    )
+
+    analysis = result.get("analysis")
+
+    if not isinstance(analysis, ComplaintAnalysis):
+        return _fallback_analysis(
+            "Não foi possível validar o resultado do fluxo de análise."
+        )
+
+    if (
+        result.get("requires_human_review")
+        and not analysis.requires_human_review
+    ):
+        analysis = analysis.model_copy(
+            update={"requires_human_review": True}
+        )
+
+    return analysis
